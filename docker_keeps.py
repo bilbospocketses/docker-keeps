@@ -336,7 +336,22 @@ _YML_KEY_RE = re.compile(r"^\s*-?\s*\w*image\s*:\s*(.*)$", re.IGNORECASE)
 _COMPOSE_KEY_RE = re.compile(r"^\s*-?\s*image\s*:\s*(.*)$")
 _DIGEST_RE = re.compile(r"(?<![A-Za-z0-9._/:@-])([A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64})(?![0-9A-Za-z])")
 MARKER = "docker-keep"   # this source never writes it with its colon, so it never marks itself
-_MARKER_RE = re.compile(r"(?<![\w-])" + re.escape(MARKER) + r":(.*)$")
+
+
+def _marker_value(line):
+    """The value of the LAST marker on `line`, or None.
+
+    A string that names the marker syntax before a real marker does not count.
+    A backward scan, not a `.*`-led regex: that one is quadratic per line, and a
+    minified file has lines of megabytes.
+    """
+    key = MARKER + ":"
+    i = line.rfind(key)
+    while i >= 0:
+        if i == 0 or not (line[i - 1].isalnum() or line[i - 1] in "_-"):
+            return line[i + len(key):]
+        i = line.rfind(key, 0, i)
+    return None
 # `V = 'lit'`, `$V = "lit"`, `V=lit` (bare only with no space: `$x = if ...` is no literal) and `V: lit`.
 _ASSIGN_RE = re.compile(
     r"(?<![\w$.-])\$?(?:(?:script|global|local|private|env):)?(?P<name>\w+)"
@@ -402,7 +417,8 @@ def _tokens(text):
 
     A quote opens a quoted part at the start of a token or after `=`; anywhere
     else it ends the token (the end of a string the command sits in). A quote
-    that is never closed, or a `)` that closes nothing, ends the command. Inside
+    that is never closed, a `)` that closes nothing, or an unquoted shell
+    operator character (`;`, `|`, `&`) ends the command. Inside
     the token's own parentheses (`$(...)`) quotes are kept as written.
     """
     out, i, n = [], 0, len(text)
@@ -429,6 +445,10 @@ def _tokens(text):
                     continue
                 i += 1
                 break
+            if c in ";|&" and not depth:          # a shell operator ends the command, as `)` does
+                if buf:
+                    out.append(("".join(buf), start))
+                return out
             if c == "(":
                 depth += 1
             elif c == ")":
@@ -515,7 +535,7 @@ def _is_command(line, start, comment):
     before = line[:start].rstrip()
     if not before or not before[-1].isalnum() or re.search(r"\\[nr]$", before):
         return True
-    word = before.split()[-1]
+    word = re.sub(r"^(?:\$\(|[\"'(\[{])+", "", before.split()[-1])   # `"sudo`, `(sudo`, `$(sudo`
     return word in _COMMAND_PREFIXES or "=" in word or word.startswith("$")
 
 
@@ -585,10 +605,10 @@ def scan_text(path: str, text: str) -> list[Hit]:
             add(i, m.group(1), "digest")
 
     for i, line in enumerate(lines):
-        m = _MARKER_RE.search(line)
-        if not m:
+        value = _marker_value(line)
+        if value is None:
             continue
-        value = m.group(1).strip()
+        value = value.strip()
         hits = [(h, g) for h, g in hits if i not in g]
         if value == "ignore":
             continue
@@ -624,21 +644,23 @@ def _commit_exists(git_dir, ref):
 
 
 def default_ref(git_dir: str) -> str | None:
-    """The ref a repository is checked at: its main or master branch, or None."""
-    try:
-        head = _git(git_dir, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
-        target = head.stdout.decode("utf-8", "replace").strip() if head.returncode == 0 else ""
-        if target.removeprefix("refs/remotes/origin/") in ("main", "master") and _commit_exists(git_dir, target):
-            return target
-        listed = _git(git_dir, "remote")
-        remotes = listed.stdout.decode("utf-8", "replace").split() if listed.returncode == 0 else []
-        remotes = ["origin"] + [r for r in remotes if r != "origin"]
-        for branch in ("main", "master"):
-            for ref in ["refs/remotes/%s/%s" % (r, branch) for r in remotes] + ["refs/heads/" + branch]:
-                if _commit_exists(git_dir, ref):
-                    return ref
-    except OSError:
-        return None
+    """The ref a repository is checked at: its main or master branch, or None.
+
+    None also when `git_dir` is no repository. Raises OSError when git cannot
+    run at all (not installed, not on PATH), so that cause is never reported
+    as a missing branch.
+    """
+    head = _git(git_dir, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    target = head.stdout.decode("utf-8", "replace").strip() if head.returncode == 0 else ""
+    if target.removeprefix("refs/remotes/origin/") in ("main", "master") and _commit_exists(git_dir, target):
+        return target
+    listed = _git(git_dir, "remote")
+    remotes = listed.stdout.decode("utf-8", "replace").split() if listed.returncode == 0 else []
+    remotes = ["origin"] + [r for r in remotes if r != "origin"]
+    for branch in ("main", "master"):
+        for ref in ["refs/remotes/%s/%s" % (r, branch) for r in remotes] + ["refs/heads/" + branch]:
+            if _commit_exists(git_dir, ref):
+                return ref
     return None
 
 
@@ -733,11 +755,11 @@ def check_repo(git_dir: str, ref: str | None = None, tooling: list[Entry] = (),
                name: str | None = None) -> list[Finding]:
     """The findings for the repository at `git_dir`, read at `ref` (default: default_ref)."""
     name = name or os.path.basename(os.path.abspath(git_dir))
-    ref = ref or default_ref(git_dir)
-    if ref is None:
-        return [Finding(name, "unreadable", "no main or master branch")]
     try:
+        ref = ref or default_ref(git_dir)
+        if ref is None:
+            return [Finding(name, "unreadable", "no main or master branch")]
         files = read_tree(git_dir, ref)
-    except OSError as exc:
+    except OSError as exc:   # git cannot run, or cannot read the tree: the real cause
         return [Finding(name, "unreadable", str(exc))]
     return check_tree(name, files, list(tooling))

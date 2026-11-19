@@ -316,6 +316,18 @@ def case_variable_with_one_literal_resolves():
     check(refs(scan_text("z.sh", "IMAGE=alpine:3.20\ndocker run \"${IMAGE}\" true\n")) == ["alpine:3.20"])
     check(refs(scan_text("z.ps1", "$script:IMG = \"redis:7\"\ndocker run $script:IMG\n")) == ["redis:7"])
     check(scan_text("z.sh", "docker run -it\n") == [])             # neither ref-shaped nor a variable: no hit
+    both = "IMAGE=acme/app\nTAG=1.2\ndocker run --rm ${IMAGE}:${TAG} true\n"         # each variable substituted (M4b)
+    check(refs(scan_text("z.sh", both)) == ["acme/app:1.2"])
+    check(refs(scan_text("z.sh", "IMAGE=acme/app\ndocker run --rm ${IMAGE}:${TAG} true\n")) == [None])
+
+
+def case_shell_operators_end_a_token():   # M1
+    check(refs(scan_text("s.sh", "docker pull alpine:3.20;\n")) == ["alpine:3.20"])
+    check(refs(scan_text("s.ps1", "docker pull alpine:3.20;\n")) == ["alpine:3.20"])
+    check(refs(scan_text("s.sh", "docker run --rm alpine:3.20|tee x\n")) == ["alpine:3.20"])
+    check(refs(scan_text("s.sh", "docker pull alpine:3.20&&echo ok\n")) == ["alpine:3.20"])
+    check(refs(scan_text("s.sh", "IMG=alpine:3.20\ndocker pull $IMG; echo ok\n")) == ["alpine:3.20"])
+    check(refs(scan_text("s.sh", "docker run --rm -e \"A=x;y|z&w\" alpine:3.20 true\n")) == ["alpine:3.20"])  # quoted: no end
 
 
 def case_keys_in_psd1_json_yml():
@@ -341,6 +353,12 @@ def case_markers():
     cont = "docker run --rm \\\n  $X \\\n  sh  # docker-keep: alpine:3.20\n"
     check([(h.line, fmt(h.ref)) for h in scan_text("t.sh", cont)] == [(3, "alpine:3.20")])
     check(scan_text("t.sh", "docker run --rm \\\n  $X \\\n  sh  # docker-keep: ignore\n") == [])
+    # The LAST marker on a line is the marker: a string that names the syntax does not count (M3).
+    check(scan_text("t.py", 'msg = "add a docker-keep: <ref> comment"  # docker-keep: ignore\n') == [])
+    check(refs(scan_text("t.sh", "docker run redis:7  # my-docker-keep: ignore\n")) == ["redis:7"])   # glued: no marker
+    # A ref marker on a line with no hit still declares that ref (M4a).
+    hits = scan_text("t.sh", "echo hi  # docker-keep: alpine:3.20\n")
+    check([(h.line, h.how, fmt(h.ref)) for h in hits] == [(1, "marker", "alpine:3.20")])
 
 
 def case_comment_prose_is_not_a_ref():
@@ -376,7 +394,9 @@ def case_prose_before_docker_is_not_a_command():   # R6
                  "$out = docker run --rm alpine:3.20 true\n", "subprocess.run('docker run --rm alpine:3.20 true')\n",
                  "  - run: docker run --rm alpine:3.20 true\n", "$o = & docker run --rm alpine:3.20 true\n",
                  "$o = Invoke-Native { docker run --rm alpine:3.20 true }\n",
-                 "docker exec $c docker run --rm alpine:3.20 true\n"):           # after a variable
+                 "docker exec $c docker run --rm alpine:3.20 true\n",            # after a variable
+                 'bash -c "sudo docker run --rm alpine:3.20 true"\n',            # a prefix glued to a quote (M2)
+                 "(sudo docker run --rm alpine:3.20 true)\n"):
         check(refs(scan_text("s.sh", line)) == ["alpine:3.20"], line)
     held = '  "content": "function Build {\\n    npm run build *>> $log\\n    docker build -t acme/app:local .\\n}"\n'
     check(refs(scan_text("cases/x.json", held)) == ["acme/app:local"])              # after an escaped line break
@@ -492,6 +512,22 @@ def case_check_repo_reads_the_default_branch_not_the_worktree():
     none = check_repo(repo_with(origin_head=None, branches=["dev"]), tooling=[])
     check(kinds(none) == ["unreadable"] and none[0].repo == "alpha")
     check(kinds(check_repo(repo, ref="refs/heads/no-such-branch", tooling=[])) == ["unreadable"])
+
+
+def case_missing_git_is_named():   # M5
+    repo = repo_with(origin_head="main")
+    empty = tempfile.mkdtemp(prefix="docker-keeps-nogit-")
+    _TEMP.append(empty)
+    saved = os.environ.get("PATH")
+    os.environ["PATH"] = empty                       # a PATH with no git on it
+    try:
+        found = check_repo(repo, tooling=[])
+        raised = raises(OSError, default_ref, repo)
+    finally:
+        os.environ["PATH"] = saved
+    check(kinds(found) == ["unreadable"])
+    check("git" in found[0].detail and found[0].detail != "no main or master branch", found[0].detail)
+    check(raised)
 
 
 # ---------------------------------------------------------------- runner
