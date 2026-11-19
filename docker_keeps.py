@@ -24,13 +24,23 @@ A MARKER comment (the marker, a colon, then its value to the end of the line)
 either drops the hits of its line (value `ignore`) or replaces them with the
 one ref it names; any other value leaves one unresolved hit.
 
+As a program it checks one repository:
+
+    python3 docker_keeps.py check --repo <dir> [--ref <ref>] [--name <name>] [--tooling-file <md>]...
+
+and prints one line per finding (format_finding), then a count line. Exit 0:
+no finding; 1: findings; 2: it cannot run (bad arguments, `--repo` is not a
+git repository, a tooling file cannot be read).
+
 Standard library only.
 """
+import argparse
 import fnmatch
 import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 
 __version__ = "1.0.0"
@@ -764,3 +774,83 @@ def check_repo(git_dir: str, ref: str | None = None, tooling: list[Entry] = (),
     except OSError as exc:   # git cannot run, or cannot read the tree: the real cause
         return [Finding(name, "unreadable", str(exc))]
     return check_tree(name, files, list(tooling))
+
+
+def format_finding(f: Finding, name: str) -> str:
+    """`docker-keeps: <name>: <kind> <detail>`, then ` (<path>:<line>)`, ` (<path>)` or nothing."""
+    where = ""
+    if f.path is not None:
+        where = " (%s%s)" % (f.path, "" if f.line is None else ":%d" % f.line)
+    return "docker-keeps: %s: %s %s%s" % (name, f.kind, f.detail, where)
+
+
+# ---------------------------------------------------------------- command line
+
+def _repository_error(path):
+    """Why `path` is not a bare repository or the top of a work tree, or None when it is one.
+
+    A directory inside a work tree is refused: git would read only its part of
+    the tree. Raises OSError when git cannot run.
+    """
+    if not os.path.isdir(path):
+        return "%s is not a directory" % path
+    bare = _git(path, "rev-parse", "--is-bare-repository")
+    cause = bare.stderr.decode("utf-8", "replace").strip()
+    if bare.returncode != 0:
+        return "%s is not a git repository%s" % (path, ": " + cause if cause else "")
+    if bare.stdout.strip() == b"true":
+        return None
+    top = _git(path, "rev-parse", "--show-toplevel")
+    root = top.stdout.decode("utf-8", "surrogateescape").strip()
+    try:
+        if top.returncode == 0 and os.path.samefile(root, path):
+            return None
+    except OSError:
+        pass
+    return "%s is not a git repository's top directory (that is %s)" % (path, root or "unknown")
+
+
+def _parser():
+    parser = argparse.ArgumentParser(
+        prog="docker-keeps", description="Check that a repository declares the Docker images its code names.")
+    parser.add_argument("--version", action="version", version="docker-keeps " + __version__)
+    commands = parser.add_subparsers(dest="command", required=True, metavar="check")
+    check = commands.add_parser("check", help="check one repository against its keep file")
+    check.add_argument("--repo", required=True, help="the repository: the top of a work tree, or a bare repository")
+    check.add_argument("--ref", help="the commit to read (default: its main or master branch)")
+    check.add_argument("--name", help="the name findings carry (default: the directory's name)")
+    check.add_argument("--tooling-file", action="append", default=[], dest="tooling_files", metavar="MD",
+                       help="a Markdown file whose machine-tooling table also declares images (repeatable)")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    """The `check` command: 0 no finding, 1 findings, 2 cannot run."""
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit as exc:          # argparse: --help and --version exit 0, a bad argument 2
+        return exc.code if isinstance(exc.code, int) else 2
+    name = args.name or os.path.basename(os.path.abspath(args.repo))
+    tooling = []
+    try:
+        for path in args.tooling_files:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    tooling += load_tooling_table(fh.read())
+            except (KeepFileError, UnicodeDecodeError) as exc:
+                raise OSError("%s: %s" % (path, exc)) from None
+        error = _repository_error(args.repo)
+    except OSError as exc:
+        error = str(exc)
+    if error is not None:
+        print("docker-keeps: cannot run: %s" % error, file=sys.stderr)
+        return 2
+    findings = check_repo(args.repo, args.ref, tooling, name)
+    for f in findings:
+        print(format_finding(f, name))
+    print("docker-keeps: %s: %d finding(s)" % (name, len(findings)))
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

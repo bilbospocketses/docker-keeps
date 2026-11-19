@@ -23,7 +23,10 @@ WHAT THIS PINS:
   * is_scanned: which paths are read, and the keep file's ignore globs;
   * default_ref / read_tree: the branch a repository is checked at, and its
     tracked text files there (never the work tree);
-  * check_tree / check_repo: the findings, their kinds and their order.
+  * check_tree / check_repo: the findings, their kinds and their order;
+  * format_finding and the `check` CLI: the finding line, the count line,
+    exit 0 (no finding), 1 (findings) and 2 (cannot run), `--tooling-file`,
+    `--ref HEAD` and `--version`.
 
 Every check counts; a case that checks nothing, or raises, is a failure.
 Temporary git repositories live under the system temp dir and are removed at
@@ -35,7 +38,9 @@ Run:  python3 tests/run_tests.py
 Exit: 0 all passed, 1 any failure.
 """
 import atexit
+import contextlib
 import inspect
+import io
 import json
 import os
 import shutil
@@ -59,6 +64,9 @@ from docker_keeps import (  # noqa: E402
     FINDING_KINDS, MACHINE_TOOLING, TABLE_END, TABLE_START, Entry, KeepFileError, Ref,
     check_repo, check_tree, claim_of, claims, covers, default_ref, is_scanned, kept_by,
     load_keep_file, load_tooling_table, parse_ref, read_tree, scan_text)
+import docker_keeps  # noqa: E402  (format_finding and main, read when each case runs)
+
+CLI = os.path.join(ROOT, "docker_keeps.py")
 
 RESULTS = []  # (case, line, ok)
 _CURRENT = ["?"]
@@ -535,6 +543,91 @@ def case_missing_git_is_named():   # M5
     check(kinds(found) == ["unreadable"])
     check("git" in found[0].detail and found[0].detail != "no main or master branch", found[0].detail)
     check(raised)
+
+
+# ---------------------------------------------------------------- the CLI
+
+def cli(*args):
+    """(exit code, stdout lines, stderr) of `python docker_keeps.py <args>`, run as a program."""
+    # errors="replace": a decode error must fail a check, never kill the reader (Windows decodes on a thread)
+    done = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, errors="replace")
+    return done.returncode, done.stdout.splitlines(), done.stderr
+
+
+def case_format_finding():   # F6: one line per finding, the name given, never the kind twice
+    Finding = docker_keeps.Finding
+    fmt_f = docker_keeps.format_finding
+    check(fmt_f(Finding("alpha", "undeclared", "node:24", "Dockerfile", 1), "alpha")
+          == "docker-keeps: alpha: undeclared node:24 (Dockerfile:1)")
+    check(fmt_f(Finding("alpha", "lapsed", "redis:7", "docker-images.json"), "alpha")
+          == "docker-keeps: alpha: lapsed redis:7 (docker-images.json)")          # a path with no line
+    check(fmt_f(Finding("alpha", "unreadable", "no main or master branch"), "alpha")
+          == "docker-keeps: alpha: unreadable no main or master branch")          # neither path nor line
+    check(fmt_f(Finding("alpha", "unresolved", "$X", "s.sh", 2), "beta")
+          == "docker-keeps: beta: unresolved $X (s.sh:2)")                        # the name given wins
+
+
+def case_cli_exit_codes():
+    clean = repo_with(origin_head="main", files={"Dockerfile": "FROM alpine:3.20\n",
+                                                 "docker-images.json": keep_with("alpine:3.20")})
+    check(cli("check", "--repo", clean) == (0, ["docker-keeps: alpha: 0 finding(s)"], ""))
+    loose = repo_with(origin_head="main", files={"Dockerfile": "FROM node:24\n", "docker-images.json": keep_with()})
+    check(cli("check", "--repo", loose) == (1, ["docker-keeps: alpha: undeclared node:24 (Dockerfile:1)",
+                                                "docker-keeps: alpha: 1 finding(s)"], ""))
+    check(cli("check", "--repo", loose, "--name", "beta")[1][-1] == "docker-keeps: beta: 1 finding(s)")
+    plain = tempfile.mkdtemp(prefix="docker-keeps-plain-")
+    _TEMP.append(plain)
+    code, out, err = cli("check", "--repo", plain)
+    check(code == 2 and out == [] and "not a git repository" in err, err)
+    os.makedirs(os.path.join(clean, "sub"))
+    code, out, err = cli("check", "--repo", os.path.join(clean, "sub"))   # inside a repository, not its top
+    check(code == 2 and out == [] and "top directory" in err, err)
+    bare = os.path.join(plain, "alpha.git")
+    subprocess.run(["git", "clone", "-q", "--bare", clean, bare], check=True, capture_output=True)
+    check(cli("check", "--repo", bare, "--ref", "local-work", "--name", "alpha")
+          == (0, ["docker-keeps: alpha: 0 finding(s)"], ""))                  # a bare repository is a repository
+    code, out, err = cli("check", "--repo", os.path.join(plain, "no-such-dir"))
+    check(code == 2 and out == [] and "not a directory" in err, err)
+    code, out, err = cli("check")
+    check(code == 2 and "--repo" in err, err)                              # --repo is required
+    code, out, err = cli()
+    check(code == 2 and "check" in err, err)                               # a command is required
+    check(cli("--version") == (0, ["docker-keeps 1.0.0"], ""))
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        code = docker_keeps.main(["check", "--repo", clean])               # main(argv) returns the exit code
+    check(code == 0 and out.getvalue() == "docker-keeps: alpha: 0 finding(s)\n")
+
+
+def case_cli_tooling_file():
+    files = {"Dockerfile": "FROM tool-x:5.1.0\n", "docker-images.json": keep_with()}
+    repo = repo_with(origin_head="main", files=files)
+    check(cli("check", "--repo", repo)[0] == 1)                            # undeclared without the table
+    table = os.path.join(FIXTURES, "tooling.md")
+    check(cli("check", "--repo", repo, "--tooling-file", table) == (0, ["docker-keeps: alpha: 0 finding(s)"], ""))
+    other = os.path.join(tempfile.mkdtemp(prefix="docker-keeps-tooling-"), "more.md")
+    _TEMP.append(os.path.dirname(other))
+    with open(other, "w", encoding="utf-8") as fh:
+        fh.write(TABLE_START + "\n| Image | Purpose |\n|---|---|\n| redis:7 | a cache |\n" + TABLE_END + "\n")
+    two = repo_with(origin_head="main", files={"s.sh": "docker pull redis:7\ndocker pull tool-x:5.1.0\n",
+                                               "docker-images.json": keep_with()})
+    check(cli("check", "--repo", two, "--tooling-file", table, "--tooling-file", other)[0] == 0)   # tables add up
+    check(cli("check", "--repo", two, "--tooling-file", other)[0] == 1)
+    code, out, err = cli("check", "--repo", repo, "--tooling-file", os.path.join(FIXTURES, "no-such.md"))
+    check(code == 2 and out == [] and "no-such.md" in err, err)            # an unreadable table: cannot run
+    code, out, err = cli("check", "--repo", repo, "--tooling-file", os.path.join(FIXTURES, "keep-ok.json"))
+    check(code == 2 and out == [] and "machine tooling" in err, err)       # no table in it: cannot run
+
+
+def case_cli_ref_head():   # the public repositories' CI form: the checked-out commit, not the default branch
+    repo = repo_with(origin_head="main", files={"Dockerfile": "FROM alpine:3.20\n",
+                                                "docker-images.json": keep_with("alpine:3.20")})
+    git(repo, "checkout", "-q", "-b", "feature")
+    write(repo, "s.sh", "docker pull redis:7\n")
+    git(repo, "add", "s.sh")
+    git(repo, "commit", "-q", "-m", "feature")
+    check(cli("check", "--repo", repo)[0] == 0)                             # the default branch is clean
+    check(cli("check", "--repo", repo, "--ref", "HEAD") == (1, ["docker-keeps: alpha: undeclared redis:7 (s.sh:1)",
+                                                                "docker-keeps: alpha: 1 finding(s)"], ""))
 
 
 # ---------------------------------------------------------------- runner

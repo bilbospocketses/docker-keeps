@@ -1,0 +1,123 @@
+# CI for docker-keeps.
+#
+# `build-and-test` is the required status check in the main branch ruleset. It is an
+# aggregate over the jobs below and passes only when every one of them succeeded:
+#   - tests (ubuntu, windows): the suite on real git fixtures, offline;
+#   - spelling: the central American spelling gate (bilbospocketses/american-spelling),
+#     pinned by commit, on the lines this change adds and its commit messages;
+#   - self-check: the checker run on this repository's own checked-out commit.
+# No job is path-filtered: a required check must report on every pull request.
+#
+# All actions are pinned to commit SHAs (the repository enforces sha_pinning_required),
+# with precise version comments so Dependabot can track them.
+#
+# No job has a time limit: a slow runner makes a step slow, not wrong. Each step that runs a
+# command runs under .github/scripts/stall-watch.sh (stall-watch.ps1 on Windows), which stops it
+# only when, for 20 minutes, it has printed no line and shown no other sign of work, prints a hang
+# record when it does, and reports the step's duration as a notice. Both scripts are copies of
+# bilbospocketses/american-spelling's.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Run the suite
+        if: runner.os != 'Windows'
+        run: bash .github/scripts/stall-watch.sh --name "Run the suite" -- python tests/run_tests.py
+
+      - name: Run the suite
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/stall-watch.ps1 "Run the suite" python tests/run_tests.py
+
+  # The gate refuses a shallow clone, so this checkout has the full history; it reads only what
+  # was added since the merge-base with the base branch. Its allow list is central: this
+  # repository has no allow file.
+  spelling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the base branch
+        run: bash .github/scripts/stall-watch.sh --name "git fetch" -- git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+
+      - name: Check out the gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: bilbospocketses/american-spelling
+          ref: 4fe6f6e29181ae120545165643d81e601e376092 # v1.0.3
+          path: .american-spelling
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Check American spelling
+        run: >-
+          bash .github/scripts/stall-watch.sh --name "Check American spelling" --
+          python .american-spelling/check-american-spelling.py
+          --repo .
+          --base "origin/${BASE}"
+          --repo-slug "${SLUG}"
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+          SLUG: ${{ github.repository }}
+
+  # The checker on itself, at the commit checked out: the form every consuming repository's CI uses.
+  self-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Check this repository's images
+        run: bash .github/scripts/stall-watch.sh --name "self-check" -- python docker_keeps.py check --repo . --ref HEAD
+
+  build-and-test:
+    needs: [tests, spelling, self-check]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded
+        run: |
+          echo "tests=${TESTS} spelling=${SPELLING} self-check=${SELF_CHECK}"
+          [ "${TESTS}" = "success" ] && [ "${SPELLING}" = "success" ] && [ "${SELF_CHECK}" = "success" ]
+        env:
+          TESTS: ${{ needs.tests.result }}
+          SPELLING: ${{ needs.spelling.result }}
+          SELF_CHECK: ${{ needs.self-check.result }}
