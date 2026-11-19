@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "images": [
+    {"ref": "alpine:3.20@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     "kind": "pin", "purpose": "base of the probe image"},
+    {"ref": "koalaman/shellcheck:stable", "kind": "pin", "purpose": "lint step in CI"},
+    {"ref": "acme/probe", "kind": "build", "purpose": "probe tools for the test lanes",
+     "dockerfile": "images/probe/Dockerfile"}
+  ],
+  "ignore": ["tests/**"]
+}
