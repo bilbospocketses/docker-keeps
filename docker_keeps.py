@@ -568,7 +568,8 @@ def scan_text(path: str, text: str) -> list[Hit]:
             m = _FROM_RE.match(line)
             words = [w for w in (m.group(1).split() if m else []) if not w.startswith("--")]
             if words:
-                if words[0].lower() not in stages:
+                # A stage name is no image, nor is `scratch`: Docker reserves it for "no base image".
+                if words[0].lower() not in stages and words[0].lower() != "scratch":
                     add(i, words[0], "from")
                 if len(words) >= 3 and words[1].lower() == "as":
                     stages.add(words[2].lower())

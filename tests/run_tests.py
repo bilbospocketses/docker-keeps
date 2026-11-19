@@ -434,6 +434,13 @@ def case_where_a_command_ends():   # R5
     check(unresolved(scan_text("s.ps1", "docker run --rm $($cfg.Image.Split('@')[0]) sh\n")) == 1)
 
 
+def case_from_scratch_is_no_image():   # D1, decided together 2026-11-19: `scratch` means no base image
+    check(scan_text("Dockerfile", "FROM scratch\n") == [])
+    check(scan_text("Dockerfile", "FROM --platform=linux/amd64 scratch AS base\nFROM base\n") == [])
+    check(scan_text("Dockerfile", "from SCRATCH as out\n") == [])                    # any case
+    check(refs(scan_text("Dockerfile", "FROM alpine:3.20 AS b\nFROM scratch\nCOPY --from=b / /\n")) == ["alpine:3.20"])
+
+
 def case_binary_and_stage_names_are_not_images():
     repo = git_repo({"bin/tool": b"\x7fELF\x00\x01FROM alpine", "Dockerfile": "FROM a:1 AS s\nFROM s\n",
                      "latin1.txt": b"caf\xe9\n"})
