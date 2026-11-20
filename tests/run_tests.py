@@ -539,13 +539,19 @@ def case_missing_git_is_named():   # M5
     saved = os.environ.get("PATH")
     os.environ["PATH"] = empty                       # a PATH with no git on it
     try:
-        found = check_repo(repo, tooling=[])
+        found = check_repo(repo, ref="HEAD", tooling=[])   # read_tree's calls
+        found_default = check_repo(repo, tooling=[])       # default_ref's calls
         raised = raises(OSError, default_ref, repo)
+        tree_raised = raises(OSError, read_tree, repo, "HEAD")
     finally:
         os.environ["PATH"] = saved
-    check(kinds(found) == ["unreadable"])
-    check("git" in found[0].detail and found[0].detail != "no main or master branch", found[0].detail)
-    check(raised)
+    # The checker's own words name git, on every OS: Windows' error text never names the program.
+    for f in (found + found_default):
+        check(kinds([f]) == ["unreadable"] and f.detail.startswith("git could not run: "), f.detail)
+    check(len(found) == 1 and len(found_default) == 1)
+    check(raised and tree_raised)
+    code, out, err = cli_with_path(empty, "check", "--repo", repo)         # the CLI: cannot run, exit 2
+    check(code == 2 and out == [] and "cannot run: git could not run: " in err, err)
 
 
 # ---------------------------------------------------------------- the CLI
@@ -553,7 +559,13 @@ def case_missing_git_is_named():   # M5
 def cli(*args):
     """(exit code, stdout lines, stderr) of `python docker_keeps.py <args>`, run as a program."""
     # errors="replace": a decode error must fail a check, never kill the reader (Windows decodes on a thread)
-    done = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, errors="replace")
+    return cli_with_path(None, *args)
+
+
+def cli_with_path(path, *args):
+    """cli(), with PATH set to `path` in the child (None: unchanged)."""
+    env = None if path is None else dict(os.environ, PATH=path)
+    done = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, errors="replace", env=env)
     return done.returncode, done.stdout.splitlines(), done.stderr
 
 
@@ -616,7 +628,7 @@ def case_cli_tooling_file():
     check(cli("check", "--repo", two, "--tooling-file", table, "--tooling-file", other)[0] == 0)   # tables add up
     check(cli("check", "--repo", two, "--tooling-file", other)[0] == 1)
     code, out, err = cli("check", "--repo", repo, "--tooling-file", os.path.join(FIXTURES, "no-such.md"))
-    check(code == 2 and out == [] and "no-such.md" in err, err)            # an unreadable table: cannot run
+    check(code == 2 and out == [] and "cannot run: tooling file " in err and "no-such.md" in err, err)  # unreadable
     code, out, err = cli("check", "--repo", repo, "--tooling-file", os.path.join(FIXTURES, "keep-ok.json"))
     check(code == 2 and out == [] and "machine tooling" in err, err)       # no table in it: cannot run
 

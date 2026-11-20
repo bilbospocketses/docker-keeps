@@ -647,7 +647,15 @@ def is_scanned(path: str, ignore: list[str]) -> bool:
 # ---------------------------------------------------------------- repositories
 
 def _git(git_dir, *args, data=None):
-    return subprocess.run(["git", "-C", git_dir, *args], input=data, capture_output=True)
+    """Run git in `git_dir`. Raises OSError naming git when it cannot start.
+
+    The OS's own text does not always name the program (Windows: `[WinError 2]
+    The system cannot find the file specified`), so the cause says git itself.
+    """
+    try:
+        return subprocess.run(["git", "-C", git_dir, *args], input=data, capture_output=True)
+    except OSError as exc:
+        raise OSError("git could not run: %s" % exc) from None
 
 
 def _commit_exists(git_dir, ref):
@@ -842,8 +850,8 @@ def main(argv: list[str]) -> int:
             try:
                 with open(path, encoding="utf-8") as fh:
                     tooling += load_tooling_table(fh.read())
-            except (KeepFileError, UnicodeDecodeError) as exc:
-                raise OSError("%s: %s" % (path, exc)) from None
+            except (OSError, KeepFileError, UnicodeDecodeError) as exc:   # the path in our words, on every OS
+                raise OSError("tooling file %s: %s" % (path, getattr(exc, "strerror", None) or exc)) from None
         error = _repository_error(args.repo)
     except OSError as exc:
         error = str(exc)
