@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0]
+## [1.0.0] - 2026-11-20
 
 ### Added
 
@@ -27,3 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   precedence machine tooling, pin, build, then list order, and a `+N` count of other sources.
 - CI: the suite on Ubuntu and Windows, the central American spelling gate, and the checker
   on this repository itself, aggregated as `build-and-test`.
+
+[Unreleased]: https://github.com/bilbospocketses/docker-keeps/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/bilbospocketses/docker-keeps/releases/tag/v1.0.0
