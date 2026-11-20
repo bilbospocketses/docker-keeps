@@ -55,8 +55,11 @@ sys.path.insert(0, ROOT)
 sys.dont_write_bytecode = True   # no __pycache__ in the work tree for a commit to pick up
 
 # git in the temp repositories, the module's own calls included, sees no
-# global or system config: no signing, no hooks, no machine settings.
+# global or system config: no signing, no hooks, no machine settings. Dropping
+# the system config also drops a CI runner's `safe.directory=*`, so the temp
+# repositories are trusted here, on every OS (test-only; the checker sets nothing).
 os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                  GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory", GIT_CONFIG_VALUE_0="*",
                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
 
@@ -628,6 +631,25 @@ def case_cli_ref_head():   # the public repositories' CI form: the checked-out c
     check(cli("check", "--repo", repo)[0] == 0)                             # the default branch is clean
     check(cli("check", "--repo", repo, "--ref", "HEAD") == (1, ["docker-keeps: alpha: undeclared redis:7 (s.sh:1)",
                                                                 "docker-keeps: alpha: 1 finding(s)"], ""))
+
+
+def case_cli_prints_an_unencodable_path():   # M2: a name git holds as non-UTF-8 bytes never ends in a traceback
+    repo = repo_with(origin_head="main")
+
+    def plumb(*args, data=None):
+        done = subprocess.run(["git", "-C", repo, *args], input=data, capture_output=True, check=True)
+        return done.stdout.decode("ascii").strip()
+
+    script = plumb("hash-object", "-w", "--stdin", data=b"docker pull node:24\n")
+    keep = plumb("hash-object", "-w", "--stdin", data=keep_with().encode("utf-8"))
+    # Built with mktree, not on disk: no filesystem has to hold the name, so this runs on Windows too.
+    tree = plumb("mktree", data=b"100644 blob " + script.encode() + b"\tcaf\xe9.sh\n"
+                 + b"100644 blob " + keep.encode() + b"\tdocker-images.json\n")
+    commit = plumb("commit-tree", tree, "-m", "a latin-1 file name")
+    code, out, err = cli("check", "--repo", repo, "--ref", commit)
+    check(code == 1 and "Traceback" not in err and err == "", err)
+    check(out == ["docker-keeps: alpha: undeclared node:24 (caf\\udce9.sh:1)",
+                  "docker-keeps: alpha: 1 finding(s)"], out)
 
 
 # ---------------------------------------------------------------- runner

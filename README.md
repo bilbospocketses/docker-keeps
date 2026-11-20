@@ -113,7 +113,7 @@ image on a machine, given as `{"refs": [RepoTags...], "repo": "<repository>", "d
   repository is its own; a `build` with a tag claims an image that carries that tag.
 
 When several entries claim one image, the one shown is, in order: a machine-tooling row,
-then a `pin`, then a `build`, then the first in list order. `kept_by` prints
+then a `pin`, then a `build`, then the first in list order. `kept_by` returns
 `machine tooling`, `<source> pin`, `<source> build`, or `-` for none, followed by ` +N` when
 N other sources (other repositories, or the table) also claim it.
 
@@ -160,7 +160,8 @@ In the files it reads, a reference is any of these:
 
 ### Markers
 
-A comment can say what a line names, as `docker-keep:` and a value to the end of the line:
+A marker says what a line names: `docker-keep:` and a value to the end of the line. It counts
+anywhere on the line, not only in a comment, though a comment is the usual place for it:
 
 ```sh
 docker build -t "$tag" .        # docker-keep: acme/app
@@ -168,8 +169,8 @@ docker run --rm redis:7 true    # docker-keep: ignore
 ```
 
 - `ignore` drops every hit of the line.
-- Exactly one ref replaces the line's hits with that ref, and declares it even on a line
-  with no hit.
+- Exactly one ref replaces the line's hits with that ref, and names it even on a line with
+  no hit; that ref still needs a keep-file entry or a table row.
 - Any other value (two refs, prose, nothing) leaves one `unresolved` hit.
 - Only the **last** marker on a line counts, so a string that mentions the syntax before a
   real marker does not. A marker glued to a word before it (`my-docker-keep:`) is no marker.

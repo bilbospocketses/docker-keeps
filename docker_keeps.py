@@ -826,6 +826,11 @@ def _parser():
 
 def main(argv: list[str]) -> int:
     """The `check` command: 0 no finding, 1 findings, 2 cannot run."""
+    # A path git holds as non-UTF-8 bytes (a surrogate), or text the console's code page
+    # lacks, prints escaped rather than ending in a traceback.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     try:
         args = _parser().parse_args(argv)
     except SystemExit as exc:          # argparse: --help and --version exit 0, a bad argument 2
